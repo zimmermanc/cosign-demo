@@ -1,0 +1,32 @@
+2025-09-10 19:17:35 [ℹ]  eksctl version 0.214.0
+2025-09-10 19:17:35 [ℹ]  using region us-east-1
+2025-09-10 19:17:35 [ℹ]  setting availability zones to [us-east-1b us-east-1a]
+2025-09-10 19:17:35 [ℹ]  subnets for us-east-1b - public:192.168.0.0/19 private:192.168.64.0/19
+2025-09-10 19:17:35 [ℹ]  subnets for us-east-1a - public:192.168.32.0/19 private:192.168.96.0/19
+2025-09-10 19:17:35 [ℹ]  nodegroup "ng-c07a57b8" will use "" [AmazonLinux2023/1.31]
+2025-09-10 19:17:35 [ℹ]  using Kubernetes version 1.31
+2025-09-10 19:17:35 [ℹ]  creating EKS cluster "cosign-demo" in "us-east-1" region with managed nodes
+2025-09-10 19:17:35 [ℹ]  will create 2 separate CloudFormation stacks for cluster itself and the initial managed nodegroup
+2025-09-10 19:17:35 [ℹ]  if you encounter any issues, check CloudFormation console or try 'eksctl utils describe-stacks --region=us-east-1 --cluster=cosign-demo'
+2025-09-10 19:17:35 [ℹ]  Kubernetes API endpoint access will use default of {publicAccess=true, privateAccess=false} for cluster "cosign-demo" in "us-east-1"
+2025-09-10 19:17:35 [ℹ]  CloudWatch logging will not be enabled for cluster "cosign-demo" in "us-east-1"
+2025-09-10 19:17:35 [ℹ]  you can enable it with 'eksctl utils update-cluster-logging --enable-types={SPECIFY-YOUR-LOG-TYPES-HERE (e.g. all)} --region=us-east-1 --cluster=cosign-demo'
+2025-09-10 19:17:35 [ℹ]  default addons coredns, metrics-server, vpc-cni, kube-proxy were not specified, will install them as EKS addons
+2025-09-10 19:17:35 [ℹ]  
+2 sequential tasks: { create cluster control plane "cosign-demo", 
+    2 sequential sub-tasks: { 
+        5 sequential sub-tasks: { 
+            1 task: { create addons },
+            wait for control plane to become ready,
+            associate IAM OIDC provider,
+            no tasks,
+            update VPC CNI to use IRSA if required,
+        },
+        create managed nodegroup "ng-c07a57b8",
+    } 
+}
+2025-09-10 19:17:35 [ℹ]  building cluster stack "eksctl-cosign-demo-cluster"
+2025-09-10 19:17:36 [!]  1 error(s) occurred and cluster hasn't been created properly, you may wish to check CloudFormation console
+2025-09-10 19:17:36 [ℹ]  to cleanup resources, run 'eksctl delete cluster --region=us-east-1 --name=cosign-demo'
+2025-09-10 19:17:36 [✖]  creating CloudFormation stack "eksctl-cosign-demo-cluster": operation error CloudFormation: CreateStack, https response error StatusCode: 400, RequestID: 4a503f09-5963-401b-b78e-6aa224018832, AlreadyExistsException: Stack [eksctl-cosign-demo-cluster] already exists
+Error: failed to create cluster "cosign-demo"
