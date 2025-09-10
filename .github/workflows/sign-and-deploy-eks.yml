@@ -1,0 +1,108 @@
+name: sign-and-deploy-eks
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_ref:
+        description: "Image to sign (e.g., nginx:1.27-alpine or ghcr.io/org/app:tag)"
+        required: true
+        type: string
+      aws_region:
+        description: "AWS region of EKS cluster"
+        required: true
+        default: "us-east-1"
+      cluster_name:
+        description: "EKS cluster name"
+        required: true
+        type: string
+      namespace:
+        description: "Kubernetes namespace to deploy"
+        required: true
+        default: "demo"
+      deployment_name:
+        description: "Kubernetes Deployment name"
+        required: true
+        default: "nginx"
+      container_name:
+        description: "Container name in Deployment"
+        required: true
+        default: "nginx"
+      role_arn:
+        description: "AWS IAM Role ARN for GitHub OIDC (if omitted, uses repo var AWS_DEPLOY_ROLE_ARN)"
+        required: false
+        type: string
+
+permissions:
+  id-token: write    # needed for keyless signing with Fulcio
+  contents: read
+  packages: read
+
+env:
+  AWS_REGION: ${{ github.event.inputs.aws_region }}
+  CLUSTER_NAME: ${{ github.event.inputs.cluster_name }}
+  NAMESPACE: ${{ github.event.inputs.namespace }}
+  DEPLOYMENT_NAME: ${{ github.event.inputs.deployment_name }}
+  CONTAINER_NAME: ${{ github.event.inputs.container_name }}
+  IMAGE_REF: ${{ github.event.inputs.image_ref }}
+
+jobs:
+  sign-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Keyless sign image (Fulcio)
+        env:
+          COSIGN_YES: "true"
+        run: |
+          echo "Signing $IMAGE_REF via keyless (Fulcio + Rekor)"
+          cosign sign "$IMAGE_REF"
+
+      - name: Verify signature (issuer + repo identity)
+        run: |
+          cosign verify \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.*$" \
+            "$IMAGE_REF"
+
+      - name: Configure AWS credentials (OIDC)
+        id: awscreds
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ github.event.inputs.role_arn || vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.29.0"
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
+
+      - name: Create namespace if missing
+        run: |
+          kubectl get ns "$NAMESPACE" >/dev/null 2>&1 || kubectl create ns "$NAMESPACE"
+
+      - name: Render manifests
+        run: |
+          mkdir -p rendered
+          export NAMESPACE DEPLOYMENT_NAME CONTAINER_NAME IMAGE_REF
+          envsubst < kavedarr/deploy/eks/k8s/namespace.yaml > rendered/namespace.yaml
+          envsubst < kavedarr/deploy/eks/k8s/deployment.yaml > rendered/deployment.yaml
+          envsubst < kavedarr/deploy/eks/k8s/service.yaml > rendered/service.yaml
+
+      - name: Apply manifests
+        run: |
+          kubectl apply -f rendered/namespace.yaml
+          kubectl apply -f rendered/deployment.yaml
+          kubectl apply -f rendered/service.yaml
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deploy/$DEPLOYMENT_NAME -n "$NAMESPACE" --timeout=120s
+

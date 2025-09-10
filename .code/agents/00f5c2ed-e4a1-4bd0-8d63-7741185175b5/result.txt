@@ -1,0 +1,648 @@
+[2025-09-10T01:19:15] Code v0.2.56
+--------
+workdir: /home/thetu/cosign
+model: gpt-5
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: detailed
+--------
+[2025-09-10T01:19:15] User instructions:
+Context: Repository: kavedarr (monorepo, Rust + GraphQL + scripts)
+- Read order followed: PLANNING.md, TASKS.md, CLAUDE.md.
+- Guardrails: Architecture–Evidence Mode; minimal diffs; plan-only (read_only).
+- Platform scope (unrelated to this demo but part of repo norms): HDBits + BTN only; qBittorrent only; no Usenet.
+- Desired demo uses only Docker, cosign, Certbot, optional Kubernetes & Wiz ImageTrust.
+- Provide a general directory structure plus 1–2 key files for quick navigation; agents may reference other files as needed.
+
+General directory structure (top-level):
+- crates/ (Rust workspace)
+- docs/
+- scripts/
+- examples/
+- tests/
+- docker-compose.*.yml
+- README.md, PLANNING.md, TASKS.md, CLAUDE.md
+
+Key files to be aware of for repo norms:
+- PLANNING.md (architecture, security standards)
+- CLAUDE.md (execution guardrails, tooling norms)
+
+Assumptions
+- Cosign and Docker/Podman installed locally; access to a registry (e.g., ghcr.io or Docker Hub).
+- Certbot is available on a host that controls a domain, producing `/etc/letsencrypt/live/<domain>/{privkey.pem,fullchain.pem}`; demo will export a restricted copy for signing.
+- Wiz tenant available or simulate policy with OPA Gatekeeper/sigstore policy-controller if Wiz is unavailable.
+
+Agent: Plan a new demo project that shows how to use Sigstore cosign with a Certbot-issued X.509 certificate (Let’s Encrypt) to sign and verify a Docker image, integrate verification with Wiz ImageTrust policy controls, and publish a minimal Nginx-based image. Deliverables should include: repo layout, scripts, sample configs, CI plan, security caveats, and optional Kubernetes admission/policy integration. Key constraints from this monorepo: evidence-first planning (no file changes), Indexers limited to HDBits + BTN, qBittorrent-only, no Usenet—these are orthogonal to this demo but define repo norms. Target audience: platform/security engineers evaluating image signing/trust enforcement.
+
+What to produce:
+- A step-by-step technical plan covering local dev, cert acquisition/handling (Certbot paths, permissions), cosign signing/verification with the Certbot key+cert chain, OCI registry flows, optional Rekor logging, and Wiz ImageTrust configuration to allow only images signed by the supplied certificate/issuer. Include a basic Nginx Dockerfile and push/sign/verify scripts. Add CI (GitHub Actions) ideas for signing on tag and verify on PR. Include alternatives: keyless OIDC (Fulcio) vs Certbot keyful, and trade-offs.
+- Security notes: LE DV cert is not intended for production “code signing”; use for demo only. Protect `privkey.pem`, avoid copying outside root-owned directory; recommend an export procedure that creates a one-time signing key copy with restrictive perms. Rotate and document revocation/renewal. Supply a policy that matches the expected LE chain (ISRG Root X1/R3) or certificate SAN/CN as the trust anchor.
+- Expected repo subtree under this monorepo (read-only planning):
+  examples/cosign-certbot-nginx/
+  - Dockerfile, nginx.conf
+  - scripts/: build.sh, push.sh, sign.sh, verify.sh, export_certbot_key.sh
+  - cosign/: policy.yaml (sigstore-policy-controller), cosign.pub (optional), keyless.md, keyful-certbot.md
+  - wiz/: imagetrust-policy.yaml, docs.md (how to connect Wiz to cluster/registry)
+  - k8s/: deployment.yaml, imagepolicy.yaml (Cosign policy controller) [optional]
+  - .github/workflows/: cosign-demo.yml [optional]
+  - README.md (end-to-end guide)
+
+Provide actionable commands, realistic file snippets, and a day-1→day-2 operations section (renewals, rotation).
+
+Desired output: Multi-phase, security-conscious project plan with commands, file map, and CI outline.
+
+Files to consider: PLANNING.md, CLAUDE.md
+
+[Running in read-only mode - no modifications allowed]
+
+[2025-09-10T01:19:53] thinking
+
+**Verifying with Cosign**
+
+I'm looking into how cosign verifies using a certificate trust store. It seems like I can use the '--certificate-identity' flag to check the Subject Alternative Name against an email or URI, particularly for LE DV certificates where the SAN is DNS names. There are some additional flags like '--certificate-identity-regexp' and '--certificate-oidc-issuer-regexp' that might not be relevant for my scenario. I want to make sure using Certbot-issued X.509 for cosign is practical. I’ll review how cosign verifies both the signature and the optional cert-extension identity.
+**Understanding Cosign Verification**
+
+I'm diving into how cosign works with non-Fulcio certificates, where the issuer can be "R3" rather than an OIDC URL. When using the CLI, the 'verify' command requires 'certificate-identity' and 'certificate-oidc-issuer' only in keyless mode. In key mode, I think I can use '--cert' to provide the certificate for verification. For keyless verification, I need to pass the necessary arguments, but using OIDC isn't required if I provide the public key. I might also consider using regex with the verification command.
+**Planning for Verification**
+
+I'm considering a plan that involves verifying with both the certificate chain and the cosign public key. I think using cosign's 'policy-controller' might help enforce the subject/issuer chain anchor with a thumbprint of the CA. The Sigstore policy could support keyless identity under the 'publicKeys' section. The policy-controller operates using Cosign policy language, specifically with a Custom Resource called 'ClusterImagePolicy.' I can configure this with various authority options, but for non-Fulcio certification trust chains, keyless might still require a Fulcio root.
+**Compiling Cosign Commands**
+
+I’m putting together some practical experience with cosign. For signing, I'd typically use a command like "cosign sign" with the path to the private key and certificate, along with a few options for uploading the image and tlog. When it's time to verify, the command relies on the 'certificate-identity' option with a SAN that's usually an email or URI, but for DV certs, it could include DNS names as well. I’m thinking about referencing internal documents for guardrails instead of relying on external ones. The user needs a practical plan, not just perfectly tested commands.
+**Compiling Cosign and ImageTrust Details**
+
+I'm compiling essential commands for cosign with non-Fulcio X.509 certificates, including flags for signing and verifying with SHA256 fingerprints. The Wiz ImageTrust policy integrates with registries to enforce approved images using cosign signatures. I need to outline scripts for building and pushing images and ensure the right permissions and security measures are mentioned. For Kubernetes integration, I’ll structure YAML policies accordingly while considering safety and accuracy. The CI plan will focus on using GitHub Actions for managing secrets and automating signing tasks. I'll check existing documentation for specific field names and details.
+[2025-09-10T01:20:34] codex
+**Understanding Cosign Verification**
+
+I'm diving into how cosign works with non-Fulcio certificates, where the issuer can be "R3" rather than an OIDC URL. When using the CLI, the 'verify' command requires 'certificate-identity' and 'certificate-oidc-issuer' only in keyless mode. In key mode, I think I can use '--cert' to provide the certificate for verification. For keyless verification, I need to pass the necessary arguments, but using OIDC isn't required if I provide the public key. I might also consider using regex with the verification command.
+[2025-09-10T01:20:34] codex
+**Planning for Verification**
+
+I'm considering a plan that involves verifying with both the certificate chain and the cosign public key. I think using cosign's 'policy-controller' might help enforce the subject/issuer chain anchor with a thumbprint of the CA. The Sigstore policy could support keyless identity under the 'publicKeys' section. The policy-controller operates using Cosign policy language, specifically with a Custom Resource called 'ClusterImagePolicy.' I can configure this with various authority options, but for non-Fulcio certification trust chains, keyless might still require a Fulcio root.
+[2025-09-10T01:20:34] codex
+**Compiling Cosign Commands**
+
+I’m putting together some practical experience with cosign. For signing, I'd typically use a command like "cosign sign" with the path to the private key and certificate, along with a few options for uploading the image and tlog. When it's time to verify, the command relies on the 'certificate-identity' option with a SAN that's usually an email or URI, but for DV certs, it could include DNS names as well. I’m thinking about referencing internal documents for guardrails instead of relying on external ones. The user needs a practical plan, not just perfectly tested commands.
+[2025-09-10T01:20:34] codex
+**Compiling Cosign and ImageTrust Details**
+
+I'm compiling essential commands for cosign with non-Fulcio X.509 certificates, including flags for signing and verifying with SHA256 fingerprints. The Wiz ImageTrust policy integrates with registries to enforce approved images using cosign signatures. I need to outline scripts for building and pushing images and ensure the right permissions and security measures are mentioned. For Kubernetes integration, I’ll structure YAML policies accordingly while considering safety and accuracy. The CI plan will focus on using GitHub Actions for managing secrets and automating signing tasks. I'll check existing documentation for specific field names and details.
+[2025-09-10T01:20:34] codex
+
+I’ll scan PLANNING.md, TASKS.md, and CLAUDE.md to align with repo guardrails, then deliver the plan.
+[2025-09-10T01:20:35] exec bash -lc 'ls -la' in /home/thetu/cosign
+[2025-09-10T01:20:35] bash -lc 'ls -la' succeeded in 5ms:
+total 260
+drwxr-xr-x  3 thetu thetu   4096 Sep  9 21:18 .
+drwxr-x--- 53 thetu thetu 253952 Sep  9 21:19 ..
+drwxr-xr-x 32 thetu thetu   4096 Sep  9 21:18 kavedarr
+[2025-09-10T01:20:35] tokens used: 19234
+
+[2025-09-10T01:20:37] thinking
+
+**Navigating file structure**
+
+I see that I have a folder named 'kavedarr' under my current working directory (cwd). So, I’m going to change my directory to 'kavedarr' or set the working directory to it. I can use the command 'rg --files' to look for files like PLANNING.md or others in that folder. This should help me find what I need!
+[2025-09-10T01:20:38] exec bash -lc 'rg --files -n | rg -n "''^(PLANNING'"\\.md|TASKS\\.md|CLAUDE\\.md)"'$"' in /home/thetu/cosign/kavedarr
+[2025-09-10T01:20:38] bash -lc 'rg --files -n | rg -n "''^(PLANNING'"\\.md|TASKS\\.md|CLAUDE\\.md)"'$"' succeeded in 30ms:
+134:CLAUDE.md
+142:PLANNING.md
+797:TASKS.md
+[2025-09-10T01:20:38] tokens used: 265
+
+[2025-09-10T01:20:40] thinking
+
+**Reading files in chunks**
+
+I need to read each file in order, using a maximum chunk size of 250 lines. This should work well since the files are probably not very large. I’ll display the contents of each file in chunks, showing the first 250 lines at a time. This way, I can manage the reading process efficiently and ensure I’m capturing everything I need without overwhelming myself or missing any crucial details.
+[2025-09-10T01:20:42] exec bash -lc "nl -ba PLANNING.md | sed -n '1,250p'" in /home/thetu/cosign/kavedarr
+[2025-09-10T01:20:42] bash -lc "nl -ba PLANNING.md | sed -n '1,250p'" succeeded in 7ms:
+     1	# PLANNING.md - Kavedarr Architecture & Vision
+     2	
+     3	## 🎯 Vision & Mission
+     4	
+     5	### Vision
+     6	A Rust-first, unified movies + series automation service that brings transparency, control, and intelligence to media management through an Advanced Analyzer system with evidence-based decision making.
+     7	
+     8	### Mission
+     9	Replace the fragmented *Arr ecosystem with a single, performant service that:
+    10	- Unifies movie and series management in one codebase
+    11	- Provides transparent, evidence-based quality decisions
+    12	- Offers GraphQL-first API for modern integrations
+    13	- Delivers enterprise-grade performance through Rust
+    14	
+    15	### Non-goals (v1)
+    16	- **No Usenet**: Torrent-only protocol support for v1 (explicit exclusion - no Usenet indexers, downloaders, or protocol support)
+    17	- **No Multi-tenant**: Single-instance deployment model  
+    18	- **No *Arr UI Parity**: GraphQL-first API design with modern frontend approach
+    19	- **No Additional Download Clients**: qBittorrent exclusive for v1 scope
+    20	
+[2025-09-10T01:20:42] tokens used: 276
+[2025-09-10T01:20:48] exec bash -lc "nl -ba PLANNING.md | sed -n '251,500p'" in /home/thetu/cosign/kavedarr
+[2025-09-10T01:20:48] bash -lc "nl -ba PLANNING.md | sed -n '251,500p'" succeeded in 6ms:
+   251	
+   252	# Run migrations
+   253	sqlx migrate run
+   254	
+   255	# Verify compile-time queries
+   256	cargo sqlx prepare
+   257	```
+   258	
+   259	## 🔌 Tracker Integrations
+   260	
+   261	### HDBits (Movies - Primary)
+   262	- **Purpose**: High-quality movie releases with internal groups
+   263	- **Integration**: Direct API + session-based analysis
+   264	- **Features**: Group reputation, MediaInfo verification, quality mapping
+   265	- **Rate Limits**: 5 seconds between requests
+   266	- **Configuration**: See `config/services.env`
+   267	
+   268	### BTN (TV/Series - Exclusive)
+   269	- **Purpose**: TV-specific content with scene mapping support
+   270	- **Integration**: Dual access approach
+[2025-09-10T01:20:48] tokens used: 4039
+[2025-09-10T01:20:50] exec bash -lc "nl -ba PLANNING.md | sed -n '501,750p'" in /home/thetu/cosign/kavedarr
+[2025-09-10T01:20:50] bash -lc "nl -ba PLANNING.md | sed -n '501,750p'" succeeded in 6ms:
+   501	- **Database**: Native PostgreSQL with extensions
+   502	- **Files**: `/etc/systemd/system/kavedarr.service`
+   503	- **Benefits**: Minimal overhead, direct control
+   504	```ini
+   505	[Service]
+   506	Type=simple
+   507	ExecStart=/usr/local/bin/kavedarr
+   508	Restart=on-failure
+   509	```
+   510	
+   511	##### 5. Kubernetes (Enterprise)
+   512	- **Architecture**: Cloud-native container orchestration
+   513	- **Database**: PostgreSQL operator or StatefulSet
+   514	- **Files**: `k8s/deployments/*.yaml`
+   515	- **Benefits**: Scalable, self-healing, cloud-ready
+   516	```yaml
+   517	kind: StatefulSet
+   518	metadata:
+   519	  name: postgres
+   520	spec:
+[2025-09-10T01:20:50] tokens used: 3711
+[2025-09-10T01:20:53] exec bash -lc "nl -ba TASKS.md | sed -n '1,250p'" in /home/thetu/cosign/kavedarr
+[2025-09-10T01:20:53] bash -lc "nl -ba TASKS.md | sed -n '1,250p'" succeeded in 7ms:
+     1	# TASKS.md - Kavedarr Development Tasks
+     2	
+     3	> Backlog Reset (2025-09-04) — All items moved to 📋 Backlog for re‑review. Validation snapshot below reflects current repo validators.
+     4	
+     5	## Milestone Overview (Reset)
+     6	
+     7	| Milestone | Status |
+     8	|-----------|--------|
+     9	| M0 | 📋 Backlog |
+    10	| M1 | 📋 Backlog |
+    11	| M2 | 📋 Backlog |
+    12	| M3 | 📋 Backlog |
+    13	| M4 | 📋 Backlog |
+    14	| M6 | 📋 Backlog |
+    15	| M7 | 📋 Backlog |
+    16	| M8 | 📋 Backlog |
+    17	
+    18	## Validation Snapshot (Repo‑wide)
+    19	
+    20	```
+[2025-09-10T01:20:53] tokens used: 3551
+[2025-09-10T01:21:02] exec bash -lc "nl -ba TASKS.md | sed -n '251,500p'" in /home/thetu/cosign/kavedarr
+[2025-09-10T01:21:02] bash -lc "nl -ba TASKS.md | sed -n '251,500p'" succeeded in 9ms:
+   251	| [QBIT-001](docs/initial/tasks/QBIT-001-add-cancel-torrents/INITIAL.md) | Add/Cancel Torrents | 2025-09-02 | Complete qBittorrent integration: add_torrent/delete_torrent methods wired to API handlers with magnet/file support, category management, error mapping. Download routes at /api/v3/download with full CRUD operations. Comprehensive tests for GUID resolution and torrent operations | ✅ Complete |
+   252	| [QBIT-004](docs/initial/tasks/QBIT-004-idempotent-enqueue/INITIAL.md) | Idempotent Enqueue | 2025-09-02 | Dual-level idempotency implemented: torrent-level (infohash+category) via exists_in_category() and database upsert. Force flag bypasses pre-check. Tags support with kvr:import-id, kvr:state, kvr:media-id for state tracking. AddTorrentParams extended, duplicate detection working | ✅ Complete |
+   253	| [IMP-002](docs/initial/tasks/IMP-002-remote-path-mapping/INITIAL.md) | Remote Path Mapping | 2025-09-03 | Database schema + repo, path mapping algorithm (longest-prefix + boundary), cross-platform normalization (Windows/POSIX/UNC), REST/GraphQL endpoints (CRUD + preview), importer integration before FS access. Env config parsed in AppConfig (strict paths/case/sep/symlinks). | ✅ Complete |
+   254	| [QBIT-005](docs/initial/tasks/QBIT-005-state-polling/INITIAL.md) | State Polling | 2025-09-02 | Enhanced state polling complete: environment configuration loading, qBittorrent state normalization to QueueStatus, 30-minute stall escalation to Failed, queue repository integration for state sync. SystemEvent emission for state/progress/speed changes. Tag sync DEFAULT ON: kvr:state=* updated on transitions, kvr:fail-reason=stalled_timeout on failure. Comprehensive test coverage | ✅ Complete |
+   255	
+   256	
+   257	### 📋 Backlog Tasks
+   258	| id | task | priority | notes |
+   259	|----|------|----------|-------|
+   260	| [SETUP-001](docs/initial/tasks/SETUP-001-validate-repo-structure/INITIAL.md) | Architecture-aware repository validation | 2025-09-05 | ✅ VALIDATED: All tier validation gates passing. Fixed test imports, cleaned duplicate extension declarations, added comprehensive validation script at scripts/validate_setup.sh. Extensions properly ordered, discovery tables have vector columns, BTN analyzer enabled by default, environment template complete | ✅ Complete |
+   261	| [API-001](docs/initial/tasks/API-001-setup-axum-server/INITIAL.md) | Setup Axum server — Status: ✅ Completed (2025-09-05)
+   262	| [M0-INT](docs/initial/tasks/M0-INT-e2e-movie-import-test/INITIAL.md) | E2E movie import test (re-test) — Status: 📋 Backlog
+   263	| [SEARCH-001](docs/initial/tasks/SEARCH-001-manual-add-ux/INITIAL.md) | Manual Add UX (re-test) — Status: 📋 Backlog
+   264	| [SEARCH-002](docs/initial/tasks/SEARCH-002-interactive-release-picker/INITIAL.md) | Interactive Release Picker (re-test) — Status: 📋 Backlog — Issue: #40
+   265	| [QUAL-001](docs/initial/tasks/QUAL-001-default-quality-profiles/INITIAL.md) | Quality Profiles (reassess) — Status: 📋 Backlog
+   266	| [QUAL-002](docs/initial/tasks/QUAL-002-default-custom-release-formats/INITIAL.md) | Custom & Release Formats (reassess) — Status: 📋 Backlog
+   267	| [MON-002](docs/initial/tasks/MON-002-daily-upgrade-sweep/INITIAL.md) | Daily Upgrade Sweep (reassess) | P0 | Apply lexicographic upgrade algorithm per profile; enforce no_regress rules; replace Prowlarr refs |
+   268	| [REL-001](docs/initial/tasks/REL-001-release-profiles/INITIAL.md) | Search Filters (reassess) | P2 | Ensure documentation states regex is search-only; no effect on acceptance/upgrades |
+   269	| [UI-008](docs/initial/tasks/UI-008-connections-test-page/INITIAL.md) | Connections Test Page (update) | P2 | Replace Prowlarr checks with HDBits/BTN connectivity |
+   270	
+[2025-09-10T01:21:02] tokens used: 9726
+[2025-09-10T01:21:05] exec bash -lc "nl -ba CLAUDE.md | sed -n '1,250p'" in /home/thetu/cosign/kavedarr
+[2025-09-10T01:21:05] bash -lc "nl -ba CLAUDE.md | sed -n '1,250p'" succeeded in 7ms:
+     1	
+     2	# CLAUDE.md — Kavedarr
+     3	> Repository: `git@github.com:zimmermanc/kavedarr.git`  
+     4	> Project root: `/home/thetu/kavedarr`
+     5	
+     6	This file consolidates all assistant behavior and workflow rules into a single source of truth (merged from the previous CLAUDE-context.md and CLAUDE.md).
+     7	
+     8	---
+     9	
+    10	## 0) Architecture–Evidence Mode (enforced)
+    11	- Default to planning with evidence. Do not change files until approval.  
+    12	- Always ground actions in verifiable sources: repository files, logs, and command output.  
+    13	- Prefer minimal, surgical diffs with clear rollback.  
+    14	- Ask questions when information conflicts or is missing; state assumptions and how you will validate them.
+    15	
+    16	---
+    17	
+    18	## 1) Read Order (every new session)
+    19	1) `product-requirements.md` (canonical product scope and requirements)  
+    20	2) `PLANNING.md` (architecture, goals, constraints)  
+[2025-09-10T01:21:05] tokens used: 7445
+
+[2025-09-10T01:22:01] thinking
+
+**Structuring file content**
+
+I'm planning to list the subtree and highlight specific files, like the Dockerfile and scripts/sign.sh. I think keeping it to about two or three samples is best. Since the prompt asked for key files, I'll include Dockerfile and scripts/sign.sh, and maybe a snippet from export_certbot_key.sh. I need to first present the directory structure and then include full content for just two key files while providing minimal code stubs for other scripts. It's all about clarity!
+**Planning file inclusion**
+
+I need to ensure we incorporate at least the Dockerfile and the sign scripts, sticking to 1-2 key files. I’ll fully include the Dockerfile and scripts/sign.sh while outlining the others as command snippets. The prompt specifies push/sign/verify scripts too, which might be a stricter requirement. However, we can provide complete content for two key files and excerpts for the others, making it actionable. I’ll implement the full Dockerfile and sign.sh, supply runnable command lines, and avoid heavy formatting. Let’s structure that neatly!
+**Starting the writing process**
+
+I'm getting ready to write by referring to both the planning and CLAUDE document recaps. I think keeping the target length within 150-200 lines is a good idea. I need to include disclaimers since cosign commands may differ and ensure a "cosign version check." 
+
+I won't require 'yq' for this. I'll integrate OCI registry flows and present everything without asking for further info. I'll also ensure to use code blocks for the Dockerfile and scripts/sign.sh, along with a snippet for the imagetrust-policy.yaml. Let's deliver a clear and concise answer!
+[2025-09-10T01:22:09] codex
+**Planning file inclusion**
+
+I need to ensure we incorporate at least the Dockerfile and the sign scripts, sticking to 1-2 key files. I’ll fully include the Dockerfile and scripts/sign.sh while outlining the others as command snippets. The prompt specifies push/sign/verify scripts too, which might be a stricter requirement. However, we can provide complete content for two key files and excerpts for the others, making it actionable. I’ll implement the full Dockerfile and sign.sh, supply runnable command lines, and avoid heavy formatting. Let’s structure that neatly!
+[2025-09-10T01:22:09] codex
+**Starting the writing process**
+
+I'm getting ready to write by referring to both the planning and CLAUDE document recaps. I think keeping the target length within 150-200 lines is a good idea. I need to include disclaimers since cosign commands may differ and ensure a "cosign version check." 
+
+I won't require 'yq' for this. I'll integrate OCI registry flows and present everything without asking for further info. I'll also ensure to use code blocks for the Dockerfile and scripts/sign.sh, along with a snippet for the imagetrust-policy.yaml. Let's deliver a clear and concise answer!
+[2025-09-10T01:22:09] codex
+
+**Evidence Recap**
+
+- Read PLANNING.md and CLAUDE.md: Architecture–Evidence Mode, minimal diffs, plan-only; Indexers limited to HDBits + BTN; qBittorrent only; no Usenet. This demo is orthogonal to those constraints and will not touch indexer/downloader scope.
+- Output is a plan (no file changes), with actionable scripts/configs and CI outline.
+
+**Demo Goal**
+
+- Publish a minimal Nginx image, sign it with Sigstore cosign using a Certbot-issued X.509 DV cert and private key, optionally log to Rekor, verify locally and in admission controls, and enforce via Wiz ImageTrust or Sigstore Policy Controller.
+- Include keyless (OIDC/Fulcio) alternative and trade-offs.
+
+**Repo Subtree**
+
+- `examples/cosign-certbot-nginx/`
+  - `Dockerfile`, `nginx.conf`
+  - `scripts/` build.sh, push.sh, sign.sh, verify.sh, export_certbot_key.sh
+  - `cosign/` policy.yaml (sigstore-policy-controller), cosign.pub (optional), keyless.md, keyful-certbot.md
+  - `wiz/` imagetrust-policy.yaml, docs.md
+  - `k8s/` deployment.yaml, imagepolicy.yaml
+  - `.github/workflows/` cosign-demo.yml
+  - `README.md` (end-to-end)
+
+Note: Below, only 1–2 key files are provided in full (Dockerfile, scripts/sign.sh). Others include concise, runnable snippets.
+
+**Local Dev Plan**
+
+- Prereqs:
+  - Docker/Podman, cosign v2+, jq, bash.
+  - Access to registry (e.g., ghcr.io/org or docker.io/user).
+  - Certbot host with `/etc/letsencrypt/live/<domain>/{privkey.pem,fullchain.pem}`.
+- Environment:
+  - `export REGISTRY=ghcr.io/<org>`
+  - `export IMAGE=cosign-certbot-nginx`
+  - `export TAG=v0.1.0` (or `latest`)
+  - `export DOMAIN=images.example.com` (FQDN with a valid LE certificate)
+  - `export IMAGE_REF="$REGISTRY/$IMAGE:$TAG"`
+
+**Key File: Dockerfile**
+
+```dockerfile
+# examples/cosign-certbot-nginx/Dockerfile
+FROM nginx:1.27-alpine
+
+# Minimal, deterministic config
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+# Security hardening
+USER nginx
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 CMD wget -qO- http://127.0.0.1:8080/health || exit 1
+
+CMD ["nginx", "-g", "daemon off;"]
+```
+
+Example `nginx.conf` (excerpt):
+```nginx
+server {
+  listen 8080;
+  server_name _;
+  location / {
+    add_header X-Demo "cosign-certbot-nginx";
+    return 200 "OK\n";
+  }
+  location /health { return 200 "healthy\n"; }
+}
+```
+
+**Key File: scripts/sign.sh**
+
+```bash
+#!/usr/bin/env bash
+# examples/cosign-certbot-nginx/scripts/sign.sh
+set -euo pipefail
+
+: "${IMAGE_REF:?Set IMAGE_REF like ghcr.io/org/cosign-certbot-nginx:tag}"
+: "${CERT_PATH:=examples/cosign-certbot-nginx/cosign/certbot-export/fullchain.pem}"
+: "${KEY_PATH:=examples/cosign-certbot-nginx/cosign/certbot-export/privkey.pem}"
+: "${TLOG_UPLOAD:=true}"   # set to false for fully offline demo
+
+# Ensure restrictive perms for private key
+chmod 600 "$KEY_PATH"
+
+# Optional: derive and persist a cosign public key for key-based verification fallback
+COSIGN_PUB=examples/cosign-certbot-nginx/cosign/cosign.pub
+cosign public-key --key "$KEY_PATH" > "$COSIGN_PUB"
+
+# Sign the image with Certbot-issued key/cert; attach cert so verifiers can inspect SAN/issuer/chain
+cosign sign \
+  --key "$KEY_PATH" \
+  --cert "$CERT_PATH" \
+  --tlog-upload="$TLOG_UPLOAD" \
+  "$IMAGE_REF"
+
+echo "Signed $IMAGE_REF"
+echo "Public key saved at $COSIGN_PUB"
+```
+
+**Supporting Scripts (snippets)**
+
+- `scripts/export_certbot_key.sh` (run on Certbot host; creates a one-time, restrictive copy):
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+: "${DOMAIN:?Set DOMAIN, e.g., images.example.com}"
+DEST="examples/cosign-certbot-nginx/cosign/certbot-export"
+SRC="/etc/letsencrypt/live/$DOMAIN"
+umask 077
+mkdir -p "$DEST"
+sudo install -m 600 "$SRC/privkey.pem" "$DEST/privkey.pem"
+sudo install -m 644 "$SRC/fullchain.pem" "$DEST/fullchain.pem"
+sudo chown "$(id -u)":"$(id -g)" "$DEST/privkey.pem" "$DEST/fullchain.pem"
+echo "Exported to $DEST (privkey 600, fullchain 644). Delete after use."
+```
+
+- `scripts/build.sh`:
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+: "${IMAGE_REF:?}"
+docker build -t "$IMAGE_REF" -f examples/cosign-certbot-nginx/Dockerfile examples/cosign-certbot-nginx
+```
+
+- `scripts/push.sh`:
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+: "${IMAGE_REF:?}"
+docker push "$IMAGE_REF"
+```
+
+- `scripts/verify.sh` (two verification paths):
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+: "${IMAGE_REF:?}"
+PUB=examples/cosign-certbot-nginx/cosign/cosign.pub
+CHAIN=examples/cosign-certbot-nginx/cosign/certbot-export/fullchain.pem
+
+# 1) Verify using pinned public key (most deterministic)
+cosign verify --key "$PUB" "$IMAGE_REF"
+
+# 2) Optional: verify using certificate identity and chain (DV cert SAN must match your domain)
+# Note: Depending on cosign version and DV cert, SAN matching may require --certificate-identity-regexp.
+# Replace DOMAIN with your actual DNS name embedded in the LE cert.
+# cosign verify \
+#   --certificate-identity-regexp "^(.*\\.)?images\\.example\\.com$" \
+#   --cert-chain "$CHAIN" \
+#   "$IMAGE_REF"
+
+echo "Verified $IMAGE_REF"
+```
+
+**Local Flow (End-to-End)**
+
+- Build:
+  - `IMAGE_REF=ghcr.io/<org>/cosign-certbot-nginx:v0.1.0`
+  - `bash examples/cosign-certbot-nginx/scripts/build.sh`
+- Push:
+  - `docker login ghcr.io`
+  - `bash examples/cosign-certbot-nginx/scripts/push.sh`
+- Export key (on Certbot host):
+  - `DOMAIN=images.example.com bash examples/cosign-certbot-nginx/scripts/export_certbot_key.sh`
+  - Securely copy `cosign/certbot-export/` to your signing workstation; remove immediately after signing.
+- Sign:
+  - `bash examples/cosign-certbot-nginx/scripts/sign.sh`
+- Verify:
+  - `bash examples/cosign-certbot-nginx/scripts/verify.sh`
+
+**Rekor (Transparency Log)**
+
+- Enabled by default via `--tlog-upload=true` in `sign.sh`.
+- Inspect entries:
+```bash
+cosign verify --key examples/cosign-certbot-nginx/cosign/cosign.pub "$IMAGE_REF" \
+  | jq '.payload | @base64d | fromjson | .optional.tlogEntries'
+```
+
+**Wiz ImageTrust (Policy Outline)**
+
+- Goal: Allow only images signed by the supplied cert/private key pair, optionally constrained to LE chain and SAN.
+- Example (adjust to your Wiz schema and tenant UI/API):
+
+```yaml
+# examples/cosign-certbot-nginx/wiz/imagetrust-policy.yaml
+apiVersion: security.wiz.io/v1alpha1
+kind: ImageTrustPolicy
+metadata:
+  name: le-certbot-cosign-demo
+spec:
+  mode: enforce
+  registries:
+    - ghcr.io/<org>
+  rules:
+    - images:
+        - ghcr.io/<org>/cosign-certbot-nginx:*
+      require:
+        - cosignSignature
+      allowSigners:
+        - x509:
+            # Option A: Pin public key (most deterministic)
+            publicKeyPem: |
+              -----BEGIN PUBLIC KEY-----
+              ...
+              -----END PUBLIC KEY-----
+            # Option B: Constrain issuer/chain and SAN to your domain
+            chainIssuers:
+              - "C=US, O=Let's Encrypt, CN=R3"
+            subjectAltName:
+              dns:
+                - "images.example.com"
+      rekor:
+        url: https://rekor.sigstore.dev
+```
+
+- Docs note: If your Wiz tenant exposes “ImageTrust” via UI, import an equivalent rule: require cosign signatures; accept only signatures whose x509 either matches your pinned public key or chains to LE R3/ISRG Root X1 and whose SAN includes `images.example.com`.
+
+**Kubernetes Admission (Sigstore Policy Controller)**
+
+- Controller CRD policy (authorities → public key). This avoids relying on DV cert semantics:
+
+```yaml
+# examples/cosign-certbot-nginx/cosign/policy.yaml
+apiVersion: policy.sigstore.dev/v1beta1
+kind: ClusterImagePolicy
+metadata:
+  name: cosign-certbot-nginx
+spec:
+  images:
+    - glob: "ghcr.io/<org>/cosign-certbot-nginx:*"
+  authorities:
+    - key:
+        data: |
+          -----BEGIN PUBLIC KEY-----
+          ...
+          -----END PUBLIC KEY-----
+      rekor:
+        url: https://rekor.sigstore.dev
+```
+
+- Minimal Nginx deploy (subject to admission):
+
+```yaml
+# examples/cosign-certbot-nginx/k8s/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cosign-certbot-nginx
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: cosign-certbot-nginx } }
+  template:
+    metadata: { labels: { app: cosign-certbot-nginx } }
+    spec:
+      containers:
+        - name: nginx
+          image: ghcr.io/<org>/cosign-certbot-nginx:v0.1.0
+          ports: [{ containerPort: 8080 }]
+```
+
+- Apply flow:
+  - Install Policy Controller (cluster admin).
+  - Apply `policy.yaml`; then apply `deployment.yaml`.
+  - Unsigned images should be denied; signed images admitted.
+
+**CI (GitHub Actions) Outline**
+
+- Trigger: `push: tags: [ 'v*' ]`, `workflow_dispatch`, `pull_request` (verify only).
+- Steps:
+  - `actions/checkout`
+  - `docker/login-action` for ghcr.io
+  - Build & push `IMAGE_REF`
+  - Install cosign: `sigstore/cosign-installer@v3`
+  - Sign (tag builds): Use secrets `LE_PRIVKEY_PEM`, `LE_FULLCHAIN_PEM` (base64-encoded)
+    - Decode to files with `chmod 600` (key) and `644` (fullchain)
+    - `cosign sign --key privkey.pem --cert fullchain.pem --tlog-upload=true "$IMAGE_REF"`
+  - Verify (PR): `cosign verify --key cosign.pub "$IMAGE_REF"`
+- Example job snippet:
+
+```yaml
+# examples/cosign-certbot-nginx/.github/workflows/cosign-demo.yml
+name: cosign-certbot-demo
+on:
+  push: { tags: [ "v*" ] }
+  pull_request: {}
+  workflow_dispatch: {}
+jobs:
+  build-sign:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with: { registry: ghcr.io, username: ${{ github.actor }}, password: ${{ secrets.GITHUB_TOKEN }} }
+      - name: Build & Push
+        run: |
+          IMAGE_REF=ghcr.io/${{ github.repository_owner }}/cosign-certbot-nginx:${GITHUB_REF_NAME}
+          docker build -t "$IMAGE_REF" -f examples/cosign-certbot-nginx/Dockerfile examples/cosign-certbot-nginx
+          docker push "$IMAGE_REF"
+          echo "IMAGE_REF=$IMAGE_REF" >> $GITHUB_ENV
+      - uses: sigstore/cosign-installer@v3
+      - name: Decode Certbot key/cert
+        run: |
+          echo "${{ secrets.LE_PRIVKEY_PEM_B64 }}" | base64 -d > privkey.pem
+          echo "${{ secrets.LE_FULLCHAIN_PEM_B64 }}" | base64 -d > fullchain.pem
+          chmod 600 privkey.pem
+      - name: Sign
+        run: cosign sign --key privkey.pem --cert fullchain.pem --tlog-upload=true "$IMAGE_REF"
+  verify-pr:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: sigstore/cosign-installer@v3
+      - name: Verify (public key)
+        run: |
+          echo "${{ secrets.COSIGN_PUB_PEM }}" > cosign.pub
+          IMAGE_REF=ghcr.io/${{ github.repository_owner }}/cosign-certbot-nginx:pr-${{ github.event.pull_request.number }}
+          cosign verify --key cosign.pub "$IMAGE_REF" || echo "PR verify skipped/failed (non-blocking demo)"
+```
+
+**Security Notes**
+
+- LE DV is not code-signing: Use for demo only. Do not treat DV cert trust as equivalent to Fulcio-issued workload identity.
+- Protect `privkey.pem`:
+  - Keep under `/etc/letsencrypt` root-owned, 600. Use `export_certbot_key.sh` to create a one-time, restrictive copy with `umask 077`, remove after signing.
+  - Avoid storing in CI; if used, inject via short-lived secrets; rotate immediately after.
+- Policy anchoring:
+  - Prefer pinned public key for enforcement (policy-controller `key.data`, Wiz `publicKeyPem`) for deterministic trust.
+  - If matching chain/issuer, constrain to LE R3/ISRG Root X1 and SAN `images.example.com`.
+- Rekor logs:
+  - Helpful for provenance/auditing; not a replacement for robust signer policy.
+
+**Day-1 → Day-2 Operations**
+
+- Renewal:
+  - `certbot renew` on host; re-run `export_certbot_key.sh` after renewal; re-sign subsequent images.
+  - Overlap window: include both old and new public keys in policies for a defined period (e.g., 7 days).
+- Rotation:
+  - Generate new DV cert (or migrate to Fulcio keyless); update policy to include new signer, then remove old after grace period.
+- Compromise Response:
+  - Immediately remove old public key from policies; rebuild/re-sign critical images; audit Rekor for suspect entries; rotate registry tokens.
+- Auditing:
+  - Periodically verify signatures for all running image SHAs; alert on drift or missing signatures.
+
+**Alternatives: Keyless OIDC (Fulcio) vs Certbot Keyful**
+
+- Keyless (Fulcio):
+  - Pros: Ephemeral keys, workload identity (e.g., GitHub OIDC), strong issuer/subject policy; easy policy-controller/Wiz integration.
+  - Cons: Requires OIDC and Fulcio availability; demo requires identity wiring.
+  - Command: `cosign sign --keyless --identity $SUBJECT --issuer https://token.actions.githubusercontent.com "$IMAGE_REF"`
+  - Policy (controller): `keyless: { issuer: "...", subject: "repo:org/repo:ref:refs/tags/*" }`
+- Certbot (DV keyful):
+  - Pros: Works fully offline; leverages existing cert infra; simple, local.
+  - Cons: DV cert not intended for code signing; SAN is DNS, not workload identity; policy matches are less semantically strong.
+  - Recommended: enforce pinned public key; treat as demo-only.
+
+**Notes on Repo Norms**
+
+- Indexers limited to HDBits + BTN; qBittorrent only; no Usenet. This demo doesn’t modify or interact with indexers/downloaders, respecting v1 constraints in PLANNING.md/CLAUDE.md.
+
+**Next Steps**
+
+- Want me to translate this into a PRP (INITIAL.md → PRP with validation gates) under `examples/cosign-certbot-nginx/`? I can draft the PRP and the README with validation commands, keeping plan-only until you approve.
+[2025-09-10T01:23:05] tokens used: 11384

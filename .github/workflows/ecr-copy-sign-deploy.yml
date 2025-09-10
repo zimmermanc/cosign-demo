@@ -1,0 +1,125 @@
+name: ecr-copy-sign-deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_image:
+        description: "Upstream image to copy (e.g., docker.io/library/nginx:1.27-alpine)"
+        required: true
+        default: "docker.io/library/nginx:1.27-alpine"
+      ecr_repo:
+        description: "ECR repository name (will be created if missing)"
+        required: true
+        default: "cosigndemo-nginx"
+      tag:
+        description: "Tag to use in ECR"
+        required: false
+        default: "main-${{ github.sha }}"
+      aws_region:
+        description: "AWS region"
+        required: true
+        default: "us-east-1"
+      cluster_name:
+        description: "EKS cluster name"
+        required: true
+        default: "cosigndemo-cz"
+      namespace:
+        description: "Kubernetes namespace"
+        required: true
+        default: "demo"
+      deployment_name:
+        description: "Deployment name"
+        required: true
+        default: "nginx"
+      container_name:
+        description: "Container name"
+        required: true
+        default: "nginx"
+      role_arn:
+        description: "AWS IAM Role ARN to assume (if omitted, uses repo var AWS_DEPLOY_ROLE_ARN)"
+        required: false
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+  packages: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ github.event.inputs.aws_region }}
+      CLUSTER_NAME: ${{ github.event.inputs.cluster_name }}
+      NAMESPACE: ${{ github.event.inputs.namespace }}
+      DEPLOYMENT_NAME: ${{ github.event.inputs.deployment_name }}
+      CONTAINER_NAME: ${{ github.event.inputs.container_name }}
+      SOURCE_IMAGE: ${{ github.event.inputs.source_image }}
+      ECR_REPO: ${{ github.event.inputs.ecr_repo }}
+      TAG: ${{ github.event.inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ github.event.inputs.role_arn || vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get AWS account ID
+        id: sts
+        run: echo "account_id=$(aws sts get-caller-identity --query Account --output text)" >> $GITHUB_OUTPUT
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Ensure ECR repo exists
+        run: |
+          aws ecr describe-repositories --repository-names "$ECR_REPO" >/dev/null 2>&1 || \
+          aws ecr create-repository --repository-name "$ECR_REPO" >/dev/null
+
+      - name: Copy upstream image to ECR
+        run: |
+          ECR_URI=${{ steps.sts.outputs.account_id }}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}
+          docker pull "$SOURCE_IMAGE"
+          docker tag  "$SOURCE_IMAGE" "$ECR_URI:$TAG"
+          docker push "$ECR_URI:$TAG"
+          echo "IMAGE_REF=$ECR_URI:$TAG" >> $GITHUB_ENV
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Keyless sign via Fulcio
+        env:
+          COSIGN_YES: "true"
+        run: cosign sign "$IMAGE_REF"
+
+      - name: Verify issuer + repo identity
+        run: |
+          cosign verify \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.*$" \
+            "$IMAGE_REF"
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.29.0"
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
+
+      - name: Render and apply manifests
+        run: |
+          mkdir -p rendered
+          export NAMESPACE DEPLOYMENT_NAME CONTAINER_NAME IMAGE_REF
+          envsubst < kavedarr/deploy/eks/k8s/namespace.yaml   > rendered/namespace.yaml
+          envsubst < kavedarr/deploy/eks/k8s/deployment.yaml  > rendered/deployment.yaml
+          envsubst < kavedarr/deploy/eks/k8s/service.yaml     > rendered/service.yaml
+          kubectl apply -f rendered/namespace.yaml
+          kubectl apply -f rendered/deployment.yaml
+          kubectl apply -f rendered/service.yaml
+
+      - name: Wait for rollout
+        run: kubectl rollout status deploy/$DEPLOYMENT_NAME -n "$NAMESPACE" --timeout=180s
+
