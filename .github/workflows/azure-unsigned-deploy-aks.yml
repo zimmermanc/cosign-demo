@@ -1,0 +1,104 @@
+name: azure-unsigned-deploy-aks
+
+on:
+  workflow_dispatch:
+    inputs:
+      acr_name:
+        description: "ACR registry name (e.g., myregistry)"
+        required: true
+      aks_resource_group:
+        description: "AKS resource group"
+        required: true
+      aks_cluster_name:
+        description: "AKS cluster name"
+        required: true
+      tenant_id:
+        description: "Azure Tenant ID"
+        required: true
+      subscription_id:
+        description: "Azure Subscription ID"
+        required: true
+      client_id:
+        description: "Client ID of App Registration with federated credential"
+        required: true
+      namespace:
+        description: "Kubernetes namespace"
+        required: true
+        default: "demo-unsigned-aks"
+      deployment_name:
+        description: "Deployment name"
+        required: true
+        default: "nginx-unsigned-aks"
+      container_name:
+        description: "Container name"
+        required: true
+        default: "nginx"
+      tag:
+        description: "Tag for unsigned image"
+        required: true
+        default: "unsigned-manual"
+
+permissions:
+  id-token: write
+  contents: read
+  packages: read
+
+jobs:
+  run:
+    name: Build (unsigned) → ACR → AKS (expect block)
+    runs-on: ubuntu-latest
+    env:
+      ACR_NAME: ${{ github.event.inputs.acr_name }}
+      AKS_RG: ${{ github.event.inputs.aks_resource_group }}
+      AKS_CLUSTER: ${{ github.event.inputs.aks_cluster_name }}
+      NAMESPACE: ${{ github.event.inputs.namespace }}
+      DEPLOYMENT_NAME: ${{ github.event.inputs.deployment_name }}
+      CONTAINER_NAME: ${{ github.event.inputs.container_name }}
+      TAG: ${{ github.event.inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v1
+        with:
+          client-id: ${{ github.event.inputs.client_id }}
+          tenant-id: ${{ github.event.inputs.tenant_id }}
+          subscription-id: ${{ github.event.inputs.subscription_id }}
+
+      - name: Login to ACR
+        run: az acr login --name "$ACR_NAME"
+
+      - name: Build and push UNSIGNED image
+        id: push
+        run: |
+          set -euo pipefail
+          ACR_URI="${ACR_NAME}.azurecr.io/cosigndemo-unsigned"
+          docker build -t "$ACR_URI:$TAG" -f kavedarr/examples/unsigned/Dockerfile .
+          docker push "$ACR_URI:$TAG"
+          echo "image_ref=$ACR_URI:$TAG" >> $GITHUB_OUTPUT
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.29.0"
+
+      - name: Set AKS context
+        run: az aks get-credentials --resource-group "$AKS_RG" --name "$AKS_CLUSTER" --overwrite-existing
+
+      - name: Render and apply manifests (expect admission block)
+        run: |
+          mkdir -p rendered
+          export NAMESPACE DEPLOYMENT_NAME CONTAINER_NAME
+          export IMAGE_REF="${{ steps.push.outputs.image_ref }}"
+          envsubst < kavedarr/deploy/eks/k8s/namespace.yaml  > rendered/namespace.yaml
+          envsubst < kavedarr/deploy/eks/k8s/deployment.yaml > rendered/deployment.yaml
+          envsubst < kavedarr/deploy/eks/k8s/service.yaml    > rendered/service.yaml
+          echo "::warning::Attempting to deploy UNSIGNED image; admission controller should reject."
+          kubectl apply -f rendered/namespace.yaml
+          kubectl apply -f rendered/deployment.yaml || echo "Deployment blocked by admission controller (expected)."
+          kubectl apply -f rendered/service.yaml || true
+
+      - name: Check status/events
+        run: |
+          kubectl get deploy/$DEPLOYMENT_NAME -n "$NAMESPACE" || true
+          kubectl get events -n "$NAMESPACE" --sort-by='.lastTimestamp' | tail -20 || true

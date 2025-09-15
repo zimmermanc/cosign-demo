@@ -1,28 +1,22 @@
-name: ecr-copy-sign-deploy
+name: aws-kms-sign-and-deploy-eks
 
 on:
   workflow_dispatch:
     inputs:
-      source_image:
-        description: "Upstream image to copy (e.g., docker.io/library/nginx:1.27-alpine)"
+      aws_region:
+        description: "AWS region for ECR/KMS/EKS"
         required: true
-        default: "docker.io/library/nginx:1.27-alpine"
+        default: "us-east-1"
       ecr_repo:
         description: "ECR repository name (will be created if missing)"
         required: true
         default: "cosigndemo-nginx"
-      tag:
-        description: "Tag to use in ECR"
-        required: false
-        default: "manual"
-      aws_region:
-        description: "AWS region"
-        required: true
-        default: "us-east-1"
       cluster_name:
         description: "EKS cluster name"
         required: true
-        default: "cosigndemo-cz"
+      kms_key_ref:
+        description: "AWS KMS key alias or ARN (e.g., alias/cosign-ec-p256)"
+        required: true
       namespace:
         description: "Kubernetes namespace"
         required: true
@@ -36,9 +30,17 @@ on:
         required: true
         default: "nginx"
       role_arn:
-        description: "AWS IAM Role ARN to assume (if omitted, uses repo var AWS_DEPLOY_ROLE_ARN)"
+        description: "AWS IAM Role ARN for OIDC (fallback: vars.AWS_DEPLOY_ROLE_ARN)"
         required: false
         type: string
+      alpine_tag:
+        description: "Alpine tag to base the image on"
+        required: true
+        default: "3.20"
+      tag:
+        description: "Tag to apply to the pushed image"
+        required: true
+        default: "manual"
 
 permissions:
   id-token: write
@@ -47,6 +49,7 @@ permissions:
 
 jobs:
   run:
+    name: Build → ECR → Cosign(KMS) → EKS
     runs-on: ubuntu-latest
     env:
       AWS_REGION: ${{ github.event.inputs.aws_region }}
@@ -54,9 +57,10 @@ jobs:
       NAMESPACE: ${{ github.event.inputs.namespace }}
       DEPLOYMENT_NAME: ${{ github.event.inputs.deployment_name }}
       CONTAINER_NAME: ${{ github.event.inputs.container_name }}
-      SOURCE_IMAGE: ${{ github.event.inputs.source_image }}
       ECR_REPO: ${{ github.event.inputs.ecr_repo }}
       TAG: ${{ github.event.inputs.tag }}
+      KMS_KEY_REF: ${{ github.event.inputs.kms_key_ref }}
+      ALPINE_TAG: ${{ github.event.inputs.alpine_tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -78,28 +82,38 @@ jobs:
           aws ecr describe-repositories --repository-names "$ECR_REPO" >/dev/null 2>&1 || \
           aws ecr create-repository --repository-name "$ECR_REPO" >/dev/null
 
-      - name: Copy upstream image to ECR
+      - name: Build and push image (Alpine base)
+        id: push
         run: |
+          set -euo pipefail
           ECR_URI=${{ steps.sts.outputs.account_id }}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}
-          docker pull "$SOURCE_IMAGE"
-          docker tag  "$SOURCE_IMAGE" "$ECR_URI:$TAG"
+          docker pull alpine:${ALPINE_TAG}
+          docker tag  alpine:${ALPINE_TAG} "$ECR_URI:$TAG"
           docker push "$ECR_URI:$TAG"
-          echo "IMAGE_REF=$ECR_URI:$TAG" >> $GITHUB_ENV
+          echo "image_ref=$ECR_URI:$TAG" >> $GITHUB_OUTPUT
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
-      - name: Keyless sign via Fulcio
+      - name: Sign image with AWS KMS
         env:
           COSIGN_YES: "true"
-        run: cosign sign "$IMAGE_REF"
-
-      - name: Verify issuer + repo identity
         run: |
-          cosign verify \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.*$" \
-            "$IMAGE_REF"
+          cosign sign --key awskms:///${KMS_KEY_REF} "${{ steps.push.outputs.image_ref }}"
+
+      - name: Verify signature (KMS key)
+        run: |
+          cosign verify --key awskms:///${KMS_KEY_REF} "${{ steps.push.outputs.image_ref }}"
+
+      - name: Export public key (PEM) for admission controller
+        run: |
+          cosign public-key --key awskms:///${KMS_KEY_REF} > aws-cosign-public.pem
+
+      - name: Upload public key artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aws-cosign-public
+          path: aws-cosign-public.pem
 
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
@@ -112,10 +126,11 @@ jobs:
       - name: Render and apply manifests
         run: |
           mkdir -p rendered
-          export NAMESPACE DEPLOYMENT_NAME CONTAINER_NAME IMAGE_REF
-          envsubst < kavedarr/deploy/eks/k8s/namespace.yaml   > rendered/namespace.yaml
-          envsubst < kavedarr/deploy/eks/k8s/deployment.yaml  > rendered/deployment.yaml
-          envsubst < kavedarr/deploy/eks/k8s/service.yaml     > rendered/service.yaml
+          export NAMESPACE DEPLOYMENT_NAME CONTAINER_NAME
+          export IMAGE_REF="${{ steps.push.outputs.image_ref }}"
+          envsubst < kavedarr/deploy/eks/k8s/namespace.yaml  > rendered/namespace.yaml
+          envsubst < kavedarr/deploy/eks/k8s/deployment.yaml > rendered/deployment.yaml
+          envsubst < kavedarr/deploy/eks/k8s/service.yaml    > rendered/service.yaml
           kubectl apply -f rendered/namespace.yaml
           kubectl apply -f rendered/deployment.yaml
           kubectl apply -f rendered/service.yaml
