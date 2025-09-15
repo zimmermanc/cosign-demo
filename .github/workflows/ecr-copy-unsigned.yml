@@ -14,7 +14,7 @@ on:
       tag:
         description: "Tag to use in ECR"
         required: true
-        default: "unsigned-${{ github.sha }}"
+        default: "unsigned-manual"
       aws_region:
         description: "AWS region"
         required: true
@@ -64,4 +64,3 @@ jobs:
           docker push "$ECR_URI:$TAG"
           echo "image_ref=$ECR_URI:$TAG" >> $GITHUB_OUTPUT
           echo "ECR unsigned image: $ECR_URI:$TAG" >> $GITHUB_STEP_SUMMARY
-
