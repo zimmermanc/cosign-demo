@@ -1,0 +1,136 @@
+name: aks-deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      acr_name:
+        description: "ACR registry name (e.g., myregistry)"
+        required: true
+      aks_resource_group:
+        description: "AKS resource group"
+        required: true
+      aks_cluster_name:
+        description: "AKS cluster name"
+        required: true
+      kv_name:
+        description: "Azure Key Vault name (required if sign=true)"
+        required: false
+      kv_key_name:
+        description: "Key name inside Key Vault"
+        required: true
+        default: "cosign-ec-p256"
+      source_image:
+        description: "Upstream image to copy (e.g., docker.io/library/alpine:3.20)"
+        required: true
+        default: "docker.io/library/alpine:3.20"
+      tag:
+        description: "Tag to apply to the image"
+        required: true
+        default: "manual"
+      namespace:
+        description: "Kubernetes namespace"
+        required: true
+        default: "demo"
+      deployment_name:
+        description: "Deployment name"
+        required: true
+        default: "nginx"
+      sign:
+        description: "Sign image with Azure Key Vault?"
+        type: boolean
+        required: true
+        default: true
+
+permissions:
+  id-token: write
+  contents: read
+  packages: read
+
+jobs:
+  run:
+    name: Copy → (Sign) → Deploy to AKS
+    runs-on: ubuntu-latest
+    env:
+      ACR_NAME: ${{ github.event.inputs.acr_name }}
+      AKS_RG: ${{ github.event.inputs.aks_resource_group }}
+      AKS_CLUSTER: ${{ github.event.inputs.aks_cluster_name }}
+      KV_NAME: ${{ github.event.inputs.kv_name }}
+      KV_KEY_NAME: ${{ github.event.inputs.kv_key_name }}
+      NAMESPACE: ${{ github.event.inputs.namespace }}
+      DEPLOYMENT_NAME: ${{ github.event.inputs.deployment_name }}
+      SOURCE_IMAGE: ${{ github.event.inputs.source_image }}
+      TAG: ${{ github.event.inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID || secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID || secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID || secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Login to ACR
+        run: az acr login --name "$ACR_NAME"
+
+      - name: Copy upstream image to ACR
+        id: push
+        run: |
+          set -euo pipefail
+          REPO="cosigndemo-nginx"
+          ACR_URI="${ACR_NAME}.azurecr.io/${REPO}"
+          docker pull "$SOURCE_IMAGE"
+          docker tag  "$SOURCE_IMAGE" "$ACR_URI:$TAG"
+          docker push "$ACR_URI:$TAG"
+          echo "image_ref=$ACR_URI:$TAG" >> $GITHUB_OUTPUT
+
+      - name: Install cosign
+        if: ${{ inputs.sign }}
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign with Azure Key Vault (optional)
+        if: ${{ inputs.sign }}
+        env:
+          COSIGN_YES: "true"
+        run: |
+          if [ -z "${KV_NAME}" ]; then
+            echo "kv_name is required when sign=true" >&2
+            exit 1
+          fi
+          KEY_URI="azurekms://${KV_NAME}.vault.azure.net/keys/${KV_KEY_NAME}"
+          cosign sign --key "$KEY_URI" "${{ steps.push.outputs.image_ref }}"
+          cosign verify --key "$KEY_URI" "${{ steps.push.outputs.image_ref }}"
+          cosign public-key --key "$KEY_URI" > azure-cosign-public.pem
+          echo "Saved azure-cosign-public.pem"
+
+      - name: Upload public key (if signed)
+        if: ${{ inputs.sign }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: azure-cosign-public
+          path: azure-cosign-public.pem
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.29.0"
+
+      - name: Set AKS context
+        run: az aks get-credentials --resource-group "$AKS_RG" --name "$AKS_CLUSTER" --overwrite-existing
+
+      - name: Render and apply manifests
+        run: |
+          mkdir -p rendered
+          export NAMESPACE DEPLOYMENT_NAME
+          export CONTAINER_NAME=${DEPLOYMENT_NAME}
+          export IMAGE_REF="${{ steps.push.outputs.image_ref }}"
+          envsubst < kavedarr/deploy/eks/k8s/namespace.yaml  > rendered/namespace.yaml
+          envsubst < kavedarr/deploy/eks/k8s/deployment.yaml > rendered/deployment.yaml
+          envsubst < kavedarr/deploy/eks/k8s/service.yaml    > rendered/service.yaml
+          kubectl apply -f rendered/namespace.yaml
+          kubectl apply -f rendered/deployment.yaml
+          kubectl apply -f rendered/service.yaml
+
+      - name: Wait for rollout
+        run: kubectl rollout status deploy/$DEPLOYMENT_NAME -n "$NAMESPACE" --timeout=180s
+

@@ -31,20 +31,31 @@ Local copies saved:
 - keys/azure-cosign-public.pem
 
 
-2) Deploy: Signed to AWS EKS
-----------------------------
+2) Unified AWS EKS Deploy (signed or unsigned)
+----------------------------------------------
 
-# Trigger workflow (build → push to ECR → sign with KMS → deploy → wait)
-gh workflow run aws-kms-sign-and-deploy-eks.yml \
+# Signed (set sign=true and provide kms_key_ref)
+gh workflow run eks-deploy.yml \
   -f aws_region=us-east-1 \
-  -f ecr_repo=cosigndemo-nginx \
   -f cluster_name=cosign-demo \
-  -f kms_key_ref=alias/cosign-ec-p256 \
+  -f ecr_repo=cosigndemo-nginx \
+  -f source_image=docker.io/library/alpine:3.20 \
+  -f tag=demo-$(date +%s) \
   -f namespace=demo \
   -f deployment_name=nginx \
-  -f container_name=nginx \
-  -f alpine_tag=3.20 \
-  -f tag=demo-$(date +%s)
+  -f sign=true \
+  -f kms_key_ref=alias/cosign-ec-p256
+
+# Unsigned (set sign=false)
+gh workflow run eks-deploy.yml \
+  -f aws_region=us-east-1 \
+  -f cluster_name=cosign-demo \
+  -f ecr_repo=cosigndemo-unsigned \
+  -f source_image=docker.io/library/alpine:3.20 \
+  -f tag=unsigned-$(date +%s) \
+  -f namespace=demo-unsigned \
+  -f deployment_name=nginx-unsigned \
+  -f sign=false
 
 # Check rollout
 aws eks update-kubeconfig --name cosign-demo --region us-east-1
@@ -66,38 +77,37 @@ gh workflow run unsigned-deploy-eks.yml \
  kubectl get events -n demo-unsigned --sort-by=.lastTimestamp | tail -20
 
 
-4) Deploy: Signed to Azure AKS
-------------------------------
+4) Unified Azure AKS Deploy (signed or unsigned)
+------------------------------------------------
 
-# Trigger workflow (build → push to ACR → sign with Key Vault → deploy → wait)
-gh workflow run azure-kv-sign-and-deploy-aks.yml \
+# Signed (set sign=true and provide kv_name)
+gh workflow run aks-deploy.yml \
   -f acr_name=acrcosign7k2b3c \
   -f aks_resource_group=rg-cosign-aks-8a7f2c \
   -f aks_cluster_name=aks-cosign-9f2d7c \
   -f kv_name=czim-cosign \
   -f kv_key_name=cosign-ec-p256 \
+  -f source_image=docker.io/library/alpine:3.20 \
+  -f tag=demo-$(date +%s) \
   -f namespace=demo \
   -f deployment_name=nginx \
-  -f container_name=nginx \
-  -f alpine_tag=3.20 \
-  -f tag=demo-$(date +%s)
+  -f sign=true
 
 # Check rollout
 az aks get-credentials -g rg-cosign-aks-8a7f2c -n aks-cosign-9f2d7c --overwrite-existing
 kubectl get pods -n demo -o wide
 
 
-5) Deploy: Unsigned to Azure AKS (expect block once policy is set)
------------------------------------------------------------------
-
-gh workflow run azure-unsigned-deploy-aks.yml \
+# Unsigned (set sign=false)
+gh workflow run aks-deploy.yml \
   -f acr_name=acrcosign7k2b3c \
   -f aks_resource_group=rg-cosign-aks-8a7f2c \
   -f aks_cluster_name=aks-cosign-9f2d7c \
+  -f source_image=docker.io/library/alpine:3.20 \
+  -f tag=unsigned-$(date +%s) \
   -f namespace=demo-unsigned-aks \
   -f deployment_name=nginx-unsigned-aks \
-  -f container_name=nginx \
-  -f tag=unsigned-$(date +%s)
+  -f sign=false
 
 # Inspect events for admission rejection
 kubectl get events -n demo-unsigned-aks --sort-by=.lastTimestamp | tail -20
