@@ -1,0 +1,179 @@
+Cosign Demo: Deploy Procedures (EKS + AKS)
+
+This document contains copy/paste commands to deploy signed and unsigned demo workloads to both AWS EKS and Azure AKS, plus the PEM public keys for your admission controller. It assumes:
+- EKS cluster: cosign-demo (region: us-east-1)
+- AKS cluster: aks-cosign-9f2d7c in resource group rg-cosign-aks-8a7f2c (region: eastus)
+- ACR: acrcosign7k2b3c
+- AWS KMS key alias: alias/cosign-ec-p256 (EC P-256)
+- Azure Key Vault: czim-cosign with key name cosign-ec-p256 (EC P-256)
+- GitHub Actions OIDC configured for both clouds and workflows present in .github/workflows
+
+
+1) Public Keys (paste into your admission controller)
+----------------------------------------------------
+
+AWS (KMS EC P-256)
+-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEWb6eIC5LvfJAvdbD3xMkbe89DQ7i
+iLCAVs6YJtYz9ZMD4Xoh1vEVdALLBQ32lx17YJ/4SS1UjroUiK6mksKVng==
+-----END PUBLIC KEY-----
+SHA256: 0d8dcef02055d0b9269dfe8b34badf6d20e5c91cdfa5d3fb89002f59075f2fd7
+
+Azure (Key Vault EC P-256)
+-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEIuT0I1xQBwq8f88zbkdwGdZ4WYfL
+1rOINL4JEEd3uHi0Qc4716iTkG1+1McKe2nHVw4gxd9rx8171z1Ji/2Cig==
+-----END PUBLIC KEY-----
+SHA256: 28f57276b7f0bfd2fca71d164ecbb5a8aafafabdbd57d1064ebb42eeacbc47f7
+
+Local copies saved:
+- keys/aws-cosign-public.pem
+- keys/azure-cosign-public.pem
+
+
+2) Deploy: Signed to AWS EKS
+----------------------------
+
+# Trigger workflow (build → push to ECR → sign with KMS → deploy → wait)
+gh workflow run aws-kms-sign-and-deploy-eks.yml \
+  -f aws_region=us-east-1 \
+  -f ecr_repo=cosigndemo-nginx \
+  -f cluster_name=cosign-demo \
+  -f kms_key_ref=alias/cosign-ec-p256 \
+  -f namespace=demo \
+  -f deployment_name=nginx \
+  -f container_name=nginx \
+  -f alpine_tag=3.20 \
+  -f tag=demo-$(date +%s)
+
+# Check rollout
+aws eks update-kubeconfig --name cosign-demo --region us-east-1
+kubectl get pods -n demo -o wide
+
+
+3) Deploy: Unsigned to AWS EKS (expect block once policy is set)
+---------------------------------------------------------------
+
+gh workflow run unsigned-deploy-eks.yml \
+  -f image_ref=nginx:1.27-alpine \
+  -f aws_region=us-east-1 \
+  -f cluster_name=cosign-demo \
+  -f namespace=demo-unsigned \
+  -f deployment_name=nginx-unsigned \
+  -f container_name=nginx
+
+# Inspect events for admission rejection
+ kubectl get events -n demo-unsigned --sort-by=.lastTimestamp | tail -20
+
+
+4) Deploy: Signed to Azure AKS
+------------------------------
+
+# Trigger workflow (build → push to ACR → sign with Key Vault → deploy → wait)
+gh workflow run azure-kv-sign-and-deploy-aks.yml \
+  -f acr_name=acrcosign7k2b3c \
+  -f aks_resource_group=rg-cosign-aks-8a7f2c \
+  -f aks_cluster_name=aks-cosign-9f2d7c \
+  -f kv_name=czim-cosign \
+  -f kv_key_name=cosign-ec-p256 \
+  -f tenant_id=$AZURE_TENANT_ID \
+  -f subscription_id=$AZURE_SUBSCRIPTION_ID \
+  -f client_id=$AZURE_CLIENT_ID \
+  -f namespace=demo \
+  -f deployment_name=nginx \
+  -f container_name=nginx \
+  -f alpine_tag=3.20 \
+  -f tag=demo-$(date +%s)
+
+# Check rollout
+az aks get-credentials -g rg-cosign-aks-8a7f2c -n aks-cosign-9f2d7c --overwrite-existing
+kubectl get pods -n demo -o wide
+
+
+5) Deploy: Unsigned to Azure AKS (expect block once policy is set)
+-----------------------------------------------------------------
+
+gh workflow run azure-unsigned-deploy-aks.yml \
+  -f acr_name=acrcosign7k2b3c \
+  -f aks_resource_group=rg-cosign-aks-8a7f2c \
+  -f aks_cluster_name=aks-cosign-9f2d7c \
+  -f tenant_id=$AZURE_TENANT_ID \
+  -f subscription_id=$AZURE_SUBSCRIPTION_ID \
+  -f client_id=$AZURE_CLIENT_ID \
+  -f namespace=demo-unsigned-aks \
+  -f deployment_name=nginx-unsigned-aks \
+  -f container_name=nginx \
+  -f tag=unsigned-$(date +%s)
+
+# Inspect events for admission rejection
+kubectl get events -n demo-unsigned-aks --sort-by=.lastTimestamp | tail -20
+
+
+5a) Create an UNSIGNED image in AWS ECR (for AWS demo)
+-----------------------------------------------------
+
+# Copy an upstream image to your ECR without signing
+gh workflow run ecr-copy-unsigned.yml \
+  -f source_image=docker.io/library/alpine:3.20 \
+  -f ecr_repo=cosigndemo-unsigned \
+  -f tag=unsigned-$(date +%s) \
+  -f aws_region=us-east-1
+
+# The resulting image URL will be:
+# 037842804132.dkr.ecr.us-east-1.amazonaws.com/cosigndemo-unsigned:<TAG>
+
+# Deploy that exact ECR URL via the existing unsigned EKS workflow
+gh workflow run unsigned-deploy-eks.yml \
+  -f image_ref=037842804132.dkr.ecr.us-east-1.amazonaws.com/cosigndemo-unsigned:<TAG> \
+  -f aws_region=us-east-1 \
+  -f cluster_name=cosign-demo \
+  -f namespace=demo-unsigned \
+  -f deployment_name=nginx-unsigned \
+  -f container_name=nginx
+
+
+6) Local Signature Verification (optional)
+------------------------------------------
+
+# ECR image (replace with your repo/tag)
+cosign verify --key keys/aws-cosign-public.pem \
+  <ACCOUNT>.dkr.ecr.us-east-1.amazonaws.com/cosigndemo-nginx:<TAG>
+
+# ACR image (replace with your tag)
+cosign verify --key keys/azure-cosign-public.pem \
+  acrcosign7k2b3c.azurecr.io/cosigndemo-nginx:<TAG>
+
+
+7) Policy Snippet (Kyverno example)
+-----------------------------------
+
+verifyImages:
+- imageReferences:
+  - "*.dkr.ecr.*.amazonaws.com/cosigndemo-nginx:*"
+  - "acrcosign7k2b3c.azurecr.io/cosigndemo-nginx:*"
+  attestors:
+  - count: 1
+    entries:
+    - keys:
+        publicKeys: |
+          -----BEGIN PUBLIC KEY-----
+          MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEWb6eIC5LvfJAvdbD3xMkbe89DQ7i
+          iLCAVs6YJtYz9ZMD4Xoh1vEVdALLBQ32lx17YJ/4SS1UjroUiK6mksKVng==
+          -----END PUBLIC KEY-----
+    - keys:
+        publicKeys: |
+          -----BEGIN PUBLIC KEY-----
+          MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEIuT0I1xQBwq8f88zbkdwGdZ4WYfL
+          1rOINL4JEEd3uHi0Qc4716iTkG1+1McKe2nHVw4gxd9rx8171z1Ji/2Cig==
+          -----END PUBLIC KEY-----
+
+
+8) Notes
+--------
+- Workflows referenced:
+  - .github/workflows/aws-kms-sign-and-deploy-eks.yml
+  - .github/workflows/azure-kv-sign-and-deploy-aks.yml
+  - .github/workflows/unsigned-deploy-eks.yml
+  - .github/workflows/azure-unsigned-deploy-aks.yml
+- Azure Key URI format (for reference): azurekms://czim-cosign.vault.azure.net/keys/cosign-ec-p256
+- If your controller trusts both PEMs, either AWS- or Azure-signed images will be admitted.
