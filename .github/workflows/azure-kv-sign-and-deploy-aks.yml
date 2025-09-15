@@ -19,15 +19,6 @@ on:
         description: "Key name inside Key Vault"
         required: true
         default: "cosign-ec-p256"
-      tenant_id:
-        description: "Azure Tenant ID"
-        required: true
-      subscription_id:
-        description: "Azure Subscription ID"
-        required: true
-      client_id:
-        description: "Client ID of App Registration with federated credential"
-        required: true
       namespace:
         description: "Kubernetes namespace"
         required: true
@@ -75,9 +66,9 @@ jobs:
       - name: Azure login (OIDC)
         uses: azure/login@v1
         with:
-          client-id: ${{ github.event.inputs.client_id }}
-          tenant-id: ${{ github.event.inputs.tenant_id }}
-          subscription-id: ${{ github.event.inputs.subscription_id }}
+          client-id: ${{ vars.AZURE_CLIENT_ID || secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID || secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID || secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Login to ACR
         run: az acr login --name "$ACR_NAME"

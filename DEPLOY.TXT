@@ -76,9 +76,6 @@ gh workflow run azure-kv-sign-and-deploy-aks.yml \
   -f aks_cluster_name=aks-cosign-9f2d7c \
   -f kv_name=czim-cosign \
   -f kv_key_name=cosign-ec-p256 \
-  -f tenant_id=$AZURE_TENANT_ID \
-  -f subscription_id=$AZURE_SUBSCRIPTION_ID \
-  -f client_id=$AZURE_CLIENT_ID \
   -f namespace=demo \
   -f deployment_name=nginx \
   -f container_name=nginx \
@@ -97,9 +94,6 @@ gh workflow run azure-unsigned-deploy-aks.yml \
   -f acr_name=acrcosign7k2b3c \
   -f aks_resource_group=rg-cosign-aks-8a7f2c \
   -f aks_cluster_name=aks-cosign-9f2d7c \
-  -f tenant_id=$AZURE_TENANT_ID \
-  -f subscription_id=$AZURE_SUBSCRIPTION_ID \
-  -f client_id=$AZURE_CLIENT_ID \
   -f namespace=demo-unsigned-aks \
   -f deployment_name=nginx-unsigned-aks \
   -f container_name=nginx \
