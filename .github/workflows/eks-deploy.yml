@@ -57,6 +57,7 @@ jobs:
       SOURCE_IMAGE: ${{ github.event.inputs.source_image }}
       ECR_REPO: ${{ github.event.inputs.ecr_repo }}
       TAG: ${{ github.event.inputs.tag }}
+      PUBLIC_ECR_ALIAS: ${{ vars.PUBLIC_ECR_ALIAS || 'o7c6t4i0' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -73,21 +74,77 @@ jobs:
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Login to Amazon ECR Public (increase pull limits)
+        run: |
+          # ECR Public auth is global in us-east-1
+          aws ecr-public get-login-password --region us-east-1 \
+            | docker login --username AWS --password-stdin public.ecr.aws
+
       - name: Ensure ECR repo exists
         run: |
           aws ecr describe-repositories --repository-names "$ECR_REPO" >/dev/null 2>&1 || \
           aws ecr create-repository --repository-name "$ECR_REPO" >/dev/null
 
-      - name: Copy upstream image to ECR
+      - name: Ensure ECR Public repo exists
+        run: |
+          aws ecr-public describe-repositories --repository-names "$ECR_REPO" --region us-east-1 >/dev/null 2>&1 || \
+          aws ecr-public create-repository --repository-name "$ECR_REPO" --region us-east-1 >/dev/null
+
+      - name: Copy upstream image to ECR (with ECR Public auth, fallback + digest)
         id: push
         run: |
           set -euo pipefail
           ECR_URI=${{ steps.sts.outputs.account_id }}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}
-          docker pull "$SOURCE_IMAGE"
-          docker tag  "$SOURCE_IMAGE" "$ECR_URI:$TAG"
+          SRC="$SOURCE_IMAGE"
+          pull_with_retry() {
+            img="$1"; attempts=${2:-6};
+            for i in $(seq 1 "$attempts"); do
+              if docker pull "$img"; then
+                return 0
+              fi
+              sleep $(( 5 * i ))
+            done
+            return 1
+          }
+          echo "Pulling $SRC"
+          if ! pull_with_retry "$SRC"; then
+            echo "Primary pull failed; attempting public ECR mirror for official images..."
+            case "$SRC" in
+              docker.io/library/nginx:*) MIRROR="public.ecr.aws/docker/library/nginx:${SRC##*:}" ;;
+              nginx:*)                   MIRROR="public.ecr.aws/docker/library/nginx:${SRC##*:}" ;;
+              docker.io/library/alpine:*) MIRROR="public.ecr.aws/docker/library/alpine:${SRC##*:}" ;;
+              alpine:*)                   MIRROR="public.ecr.aws/docker/library/alpine:${SRC##*:}" ;;
+              *) MIRROR="" ;;
+            esac
+            if [ -n "$MIRROR" ]; then
+              echo "Trying mirror: $MIRROR"
+              pull_with_retry "$MIRROR"
+              SRC="$MIRROR"
+            else
+              echo "No mirror configured for $SRC" >&2
+              exit 1
+            fi
+          fi
+          docker tag  "$SRC" "$ECR_URI:$TAG"
           docker push "$ECR_URI:$TAG"
-          echo "image_ref=$ECR_URI:$TAG" >> $GITHUB_OUTPUT
-          echo "image_uri=$ECR_URI:$TAG" >> $GITHUB_OUTPUT
+
+          PUBLIC_URI="public.ecr.aws/${PUBLIC_ECR_ALIAS}/${ECR_REPO}"
+          docker tag  "$SRC" "$PUBLIC_URI:$TAG"
+          docker push "$PUBLIC_URI:$TAG"
+
+          PRIVATE_DIGEST=$(aws ecr describe-images --repository-name "$ECR_REPO" --image-ids imageTag="$TAG" --query 'imageDetails[0].imageDigest' --output text)
+          PUBLIC_DIGEST=$(aws ecr-public describe-images --repository-name "$ECR_REPO" --image-ids imageTag="$TAG" --region us-east-1 --query 'imageDetails[0].imageDigest' --output text)
+
+          echo "image_ref_private=$ECR_URI@$PRIVATE_DIGEST" >> $GITHUB_OUTPUT
+          echo "image_ref_public=$PUBLIC_URI@$PUBLIC_DIGEST" >> $GITHUB_OUTPUT
+          echo "image_ref=$PUBLIC_URI@$PUBLIC_DIGEST" >> $GITHUB_OUTPUT
+          echo "image_uri_private=$ECR_URI:$TAG" >> $GITHUB_OUTPUT
+          echo "image_uri_public=$PUBLIC_URI:$TAG" >> $GITHUB_OUTPUT
+          {
+            echo "Private digest: $PRIVATE_DIGEST"
+            echo "Public digest:  $PUBLIC_DIGEST"
+            echo "Public URI:     $PUBLIC_URI"
+          } >> $GITHUB_STEP_SUMMARY
 
       - name: Install cosign
         if: ${{ inputs.sign }}
@@ -103,8 +160,10 @@ jobs:
             exit 1
           fi
           KEY_URI="awskms:///${{ github.event.inputs.kms_key_ref }}"
-          cosign sign --key "$KEY_URI" "${{ steps.push.outputs.image_ref }}"
-          cosign verify --key "$KEY_URI" "${{ steps.push.outputs.image_ref }}"
+          cosign sign --key "$KEY_URI" "${{ steps.push.outputs.image_ref_private }}"
+          cosign sign --key "$KEY_URI" "${{ steps.push.outputs.image_ref_public }}"
+          cosign verify --key "$KEY_URI" "${{ steps.push.outputs.image_ref_private }}"
+          cosign verify --key "$KEY_URI" "${{ steps.push.outputs.image_ref_public }}"
           cosign public-key --key "$KEY_URI" > aws-cosign-public.pem
           echo "Saved aws-cosign-public.pem"
       
@@ -120,15 +179,38 @@ jobs:
         with:
           version: "v1.29.0"
 
+      - name: Install eksctl (for IAM identity mapping)
+        run: |
+          curl -sSL -o /tmp/eksctl.tar.gz "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_$(uname -s | tr '[:upper:]' '[:lower:]')_amd64.tar.gz"
+          tar -xzf /tmp/eksctl.tar.gz -C /tmp && sudo mv /tmp/eksctl /usr/local/bin/eksctl
+          eksctl version || true
+
+      - name: Map GitHub OIDC role into cluster-admin (idempotent)
+        env:
+          ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+        run: |
+          eksctl create iamidentitymapping \
+            --cluster "$CLUSTER_NAME" \
+            --region  "$AWS_REGION" \
+            --arn     "$ROLE_ARN" \
+            --username github-actions \
+            --group    system:masters || true
+
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
+
+      - name: Preflight cluster auth
+        run: |
+          kubectl version --short || true
+          kubectl config current-context || true
+          kubectl cluster-info || true
 
       - name: Render and apply manifests
         run: |
           mkdir -p rendered
           export NAMESPACE DEPLOYMENT_NAME
           export CONTAINER_NAME=${DEPLOYMENT_NAME}
-          export IMAGE_REF="${{ steps.push.outputs.image_ref }}"
+          export IMAGE_REF="${{ steps.push.outputs.image_ref_public }}"
           envsubst < kavedarr/deploy/eks/k8s/namespace.yaml  > rendered/namespace.yaml
           envsubst < kavedarr/deploy/eks/k8s/deployment.yaml > rendered/deployment.yaml
           envsubst < kavedarr/deploy/eks/k8s/service.yaml    > rendered/service.yaml
@@ -138,4 +220,3 @@ jobs:
 
       - name: Wait for rollout
         run: kubectl rollout status deploy/$DEPLOYMENT_NAME -n "$NAMESPACE" --timeout=180s
-
